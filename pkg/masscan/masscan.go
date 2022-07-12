@@ -1,0 +1,583 @@
+package masscan
+
+import (
+	"context"
+	"encoding/binary"
+	"fmt"
+	"github.com/dchest/siphash"
+	"github.com/google/gopacket"
+	"github.com/google/gopacket/layers"
+	"github.com/google/gopacket/pcap"
+	"github.com/jackpal/gateway"
+	"github.com/pkg/errors"
+	"github.com/rs/zerolog"
+	"inet.af/netaddr"
+	"math/rand"
+	"net"
+	"strings"
+	"sync"
+	"time"
+)
+
+const (
+	arpDst4 = "1.1.1.1"
+	arpDst6 = "2606:4700:4700::1111"
+
+	entropySeed = 1
+)
+
+type Port = uint16
+
+type tup struct {
+	ip   netaddr.IP
+	port Port
+}
+
+type Dst struct {
+	tup
+}
+
+type Targets struct {
+	IPs      []netaddr.IP
+	Ports    []Port
+	shuffled bool
+}
+
+func (t Targets) IsEmpty() bool {
+	return len(t.IPs) == 0 && len(t.Ports) == 0
+}
+
+func (t Targets) MaxIdx() uint64 {
+	return uint64(int64(len(t.IPs) * len(t.Ports)))
+}
+
+// Shuffle will randomize the order of the IPs in the list
+// This is an inplace 0 allocation shuffle, so can be used to reorder all
+// of the packets sent to different hosts
+func (t *Targets) Shuffle() {
+	if t.shuffled {
+		return
+	}
+
+	t.shuffled = true
+
+	shuffler := rand.New(rand.NewSource(time.Now().UnixNano()))
+	shuffler.Shuffle(len(t.IPs), func(i, j int) { t.IPs[i], t.IPs[j] = t.IPs[j], t.IPs[i] })
+}
+
+// Get will return the corresponding Dst from the targets list
+// based off the size. This will always return a valid value
+// If the value exceeds MaxIdx, then it will loop around and restart
+// from 0
+// This ordering should yield a "random" ordering of the ports and hosts
+// which should be a sufficient distribution to not dos any services
+func (t Targets) Get(i uint64) Dst {
+	if i > t.MaxIdx() {
+		i = i % t.MaxIdx()
+	}
+
+	ipIdx := i % uint64(len(t.IPs))
+	ipLoop := i / uint64(len(t.IPs))
+	portIdx := (ipLoop + ipIdx) % uint64(len(t.Ports))
+	return Dst{
+		tup{
+			ip:   t.IPs[ipIdx],
+			port: t.Ports[portIdx],
+		},
+	}
+}
+
+type ResultState int
+
+const (
+	ResultState_UNKNOWN ResultState = iota
+	ResultState_OPEN
+	ResultState_CLOSE
+)
+
+type Res struct {
+	dst   Dst
+	state ResultState
+}
+
+type src struct {
+	tup
+}
+
+func (t tup) String() string {
+	return fmt.Sprintf("%s:%d", t.ip.String(), t.port)
+}
+
+func (t *tup) Nil() bool {
+	if t == nil {
+		return true
+	}
+	return t.port == 0 && t.ip.IsZero()
+}
+
+type netHandle struct {
+	handle *pcap.Handle
+	name   string
+	src    src
+}
+
+func buildcookie(src src, dst Dst, buf []byte) []byte {
+	srcip := src.ip.As16()
+	buf = append(buf, srcip[:]...)
+
+	tmp := make([]byte, 2)
+	binary.LittleEndian.PutUint16(tmp, src.port)
+	buf = append(buf, tmp...)
+
+	dstip := dst.ip.As16()
+	buf = append(buf, dstip[:]...)
+	binary.LittleEndian.PutUint16(tmp, dst.port)
+	buf = append(buf, tmp...)
+	return buf
+}
+
+// buildcookie2 will construct the cookie using a direct write to the buffer memory
+// this assumes the input buffer is of sufficient length
+func buildcookie2(src src, dst Dst, buf []byte) {
+	if len(buf) < 36 {
+		return
+	}
+	srcip := src.ip.As16()
+	copy(buf[0:16], srcip[:])
+	binary.LittleEndian.PutUint16(buf[16:18], src.port)
+
+	dstip := dst.ip.As16()
+	copy(buf[18:34], dstip[:])
+	binary.LittleEndian.PutUint16(buf[34:36], dst.port)
+}
+
+type SynCookie uint64
+
+func SynCookieV4(src src, dst Dst, seed uint64) SynCookie {
+	var data [36]byte
+	buildcookie2(src, dst, data[:])
+	sum64 := siphash.Hash(seed, seed, data[:])
+	return SynCookie(sum64)
+}
+
+func (c *Client) AppendPacket(src src, dst Dst, cookie SynCookie) {
+	ip4 := &layers.IPv4{
+		TTL:      64,
+		Protocol: layers.IPProtocolTCP,
+		SrcIP:    src.ip.IPAddr().IP,
+		DstIP:    dst.ip.IPAddr().IP,
+		Version:  4,
+	}
+
+	tcp := &layers.TCP{
+		SrcPort: layers.TCPPort(src.port),
+		DstPort: layers.TCPPort(dst.port),
+		SYN:     true,
+		Seq:     uint32(cookie),
+	}
+
+	c.Log.Trace().
+		Str("srcMAC", c.srcMAC.String()).
+		Str("dstMAC", c.dstMAC.String()).
+		Uint16("srcPort", src.port).
+		Uint16("dstPort", dst.port).
+		Str("srcIP", src.ip.String()).
+		Str("dstIP", dst.ip.String()).
+		Msg("sending packet")
+
+	tcp.SetNetworkLayerForChecksum(ip4)
+	gopacket.SerializeLayers(c.buf, c.opts,
+		&layers.Ethernet{
+			SrcMAC:       c.srcMAC,
+			DstMAC:       c.dstMAC,
+			EthernetType: layers.EthernetTypeIPv4,
+		},
+		ip4,
+		tcp,
+	)
+}
+
+type Client struct {
+	// iface is the interface to send packets on.
+	iface *net.Interface
+	// destination, gateway (if applicable), and source IP addresses to use.
+	// Dst, gw, src net.IP
+
+	handle     *pcap.Handle
+	handleName string
+
+	// opts and buf allow us to easily serialize packets in the send()
+	// method.
+	opts gopacket.SerializeOptions
+	buf  gopacket.SerializeBuffer
+
+	src src
+
+	srcMAC, dstMAC net.HardwareAddr
+
+	Log zerolog.Logger
+}
+
+// getHwAddr is a hacky but effective way to get the destination hardware
+// address for our packets.  It does an ARP request for our gateway (if there is
+// one) or destination IP (if no gateway is necessary), then waits for an ARP
+// reply.  This is pretty slow right now, since it blocks on the ARP
+// request/reply.
+// we shameless "borrow" this code from gopacket/examples/synscan/main.go
+func (c *Client) getHwAddr() (srcIP net.IP, src net.HardwareAddr, dst net.HardwareAddr, err error) {
+	start := time.Now()
+	// we do a fixed lookup for some random ip address. This should hopefully respond. i have no idea
+	// Prepare the layers to send for an ARP request.
+	srcMac, err := net.InterfaceByName(c.handleName)
+	if err != nil {
+		return nil, nil, nil, errors.Wrap(err, "failed to get hardware addr")
+	}
+	srcAddrs, err := srcMac.Addrs()
+	if err != nil {
+		return nil, nil, nil, errors.Wrap(err, "failed to get hardware ip")
+	}
+
+	c.Log.Debug().
+		Msgf("src addrs: %+v", srcAddrs)
+	var (
+		arpDstAddr, srcAddr string
+		srcAddrByte         net.IP
+	)
+	for _, v := range srcAddrs {
+		srcAddr = v.String()
+		if strings.ContainsAny(v.String(), ":") {
+			// skip ip6 for now to get it working on ip4
+			arpDstAddr = arpDst6
+			srcAddrByte = v.(*net.IPNet).IP
+			continue
+		} else {
+			arpDstAddr = arpDst4
+			srcAddrByte = v.(*net.IPNet).IP
+		}
+	}
+	// remove the cidr
+	srcAddr, _, _ = strings.Cut(srcAddr, "/")
+
+	dstAddrIP, err := gateway.DiscoverGateway()
+	if err != nil {
+		return nil, nil, nil, errors.Wrap(err, "failed to get gateway addr")
+	}
+	arpDstAddr = dstAddrIP.String()
+
+	c.Log.Trace().
+		Str("srcMAC", srcMac.HardwareAddr.String()).
+		Str("srcProt", srcAddr).
+		Bytes("srcProtByte", srcAddrByte.To4()).
+		Bytes("srcProtIPByte", srcAddrByte).
+		Bytes("dstProtByte", dstAddrIP.To4()).
+		Str("dstProt", arpDstAddr).
+		Msg("sending ARP request")
+
+	eth := layers.Ethernet{
+		SrcMAC:       srcMac.HardwareAddr,
+		DstMAC:       net.HardwareAddr{0xff, 0xff, 0xff, 0xff, 0xff, 0xff},
+		EthernetType: layers.EthernetTypeARP,
+	}
+	arp := layers.ARP{
+		AddrType:          layers.LinkTypeEthernet,
+		Protocol:          layers.EthernetTypeIPv4,
+		HwAddressSize:     6,
+		ProtAddressSize:   4,
+		Operation:         layers.ARPRequest,
+		SourceHwAddress:   []byte(srcMac.HardwareAddr),
+		SourceProtAddress: srcAddrByte.To4(),
+		// SourceProtAddress: dstAddrIP.To4(),
+		DstHwAddress:   []byte{0, 0, 0, 0, 0, 0},
+		DstProtAddress: dstAddrIP.To4(),
+	}
+	// Send a single ARP request packet (we never retry a send, since this
+	// is just an example ;)
+	// TODO: optimize this to make arp with retries
+	if err := c.send(&eth, &arp); err != nil {
+		return nil, nil, nil, errors.Wrap(err, "failed to send arp req")
+	}
+	// Wait 3 seconds for an ARP reply.
+	for {
+		if time.Since(start) > time.Second*3 {
+			return nil, nil, nil, errors.New("timeout getting ARP reply")
+		}
+		data, _, err := c.handle.ReadPacketData()
+		if err == pcap.NextErrorTimeoutExpired {
+			continue
+		} else if err != nil {
+			return nil, nil, nil, errors.Wrap(err, "failed to read packet data")
+		}
+		packet := gopacket.NewPacket(data, layers.LayerTypeEthernet, gopacket.NoCopy)
+		if arpLayer := packet.Layer(layers.LayerTypeARP); arpLayer != nil {
+			arp := arpLayer.(*layers.ARP)
+			c.Log.Trace().
+				Bytes("srcMAC", arp.SourceHwAddress).
+				Bytes("dstMAC", arp.DstHwAddress).
+				Bytes("arpDstAddr", arp.DstProtAddress).
+				Bytes("arpSrcAddr", arp.SourceProtAddress).
+				Msg("received arp request")
+			if net.IP(arp.SourceProtAddress).Equal(dstAddrIP.To4()) {
+				return srcAddrByte, srcMac.HardwareAddr, arp.SourceHwAddress, nil
+			}
+		}
+	}
+}
+
+// send sends the given layers as a single packet on the network.
+func (c *Client) send(l ...gopacket.SerializableLayer) error {
+	if err := gopacket.SerializeLayers(c.buf, c.opts, l...); err != nil {
+		return err
+	}
+	return c.handle.WritePacketData(c.buf.Bytes())
+}
+
+func New(iface string, log zerolog.Logger) (*Client, error) {
+	sublog := log.With().
+		Str("ctx", "clientInit").
+		Logger()
+
+	devices, err := pcap.FindAllDevs()
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to find devices")
+	}
+
+	var pcapiface pcap.Interface
+	var found bool
+	for _, dv := range devices {
+		sublog.Debug().
+			Str("device", dv.Name).
+			Msg("devices")
+
+		if dv.Name == iface {
+			pcapiface = dv
+			found = true
+			break
+		}
+	}
+	if !found {
+		return nil, errors.Wrap(err, "unable to find device")
+	}
+
+	if len(pcapiface.Addresses) == 0 {
+		return nil, errors.Wrap(err, "iface selected has no addresses")
+	}
+
+	var (
+		snapshot_len int32         = 65536
+		promiscuous  bool          = true
+		timeout      time.Duration = pcap.BlockForever
+		dev                        = pcapiface.Name
+		// srcIP                      = pcapiface.Addresses[0].IP
+		handle *pcap.Handle
+	)
+	handle, err = pcap.OpenLive(
+		dev,
+		snapshot_len,
+		promiscuous,
+		timeout,
+	)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to open pcap")
+	}
+
+	c := &Client{
+		handle:     handle,
+		handleName: dev,
+		// src:        srcIP,
+		opts: gopacket.SerializeOptions{
+			FixLengths:       true,
+			ComputeChecksums: true,
+		},
+		buf: gopacket.NewSerializeBuffer(),
+		src: src{tup{
+			port: 42069,
+		}},
+		Log: log.With().Str("ctx", "masscan").Logger(),
+	}
+	var tmpip net.IP
+	tmpip, c.srcMAC, c.dstMAC, err = c.getHwAddr()
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to retrieve hw addr")
+	}
+
+	c.src.ip, _ = netaddr.FromStdIP(tmpip)
+
+	return c, nil
+}
+
+func (c *Client) Close() error {
+	c.handle.Close()
+	return nil
+}
+
+func (c *Client) sender(ctx context.Context, in <-chan Dst) {
+	c.Log.Debug().
+		Str("handle", c.handleName).
+		Msg("sending on")
+
+loop:
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case t, ok := <-in:
+			if t.Nil() && !ok {
+				break loop
+			}
+
+			c.Log.Debug().
+				Str("host", t.ip.String()).
+				Uint16("port", t.port).
+				Msg("sending")
+			cookie := SynCookieV4(c.src, t, entropySeed)
+			c.AppendPacket(c.src, t, cookie)
+			tmp := c.buf.Bytes()
+			c.Log.Trace().
+				Bytes("packet", tmp).
+				Msg("writing data")
+			if err := c.handle.WritePacketData(tmp); err != nil {
+				c.Log.Error().
+					Str("host", t.ip.String()).
+					Uint16("port", t.port).
+					Err(err).
+					Msg("failed to write packet data")
+			}
+			if err := c.buf.Clear(); err != nil {
+				c.Log.Error().
+					Str("host", t.ip.String()).
+					Uint16("port", t.port).
+					Err(err).
+					Msg("failed to clear the buffer")
+
+			}
+		}
+	}
+	c.Log.Debug().Msg("exiting sender")
+}
+
+func (c *Client) recver(ctx context.Context) {
+	c.Log.Debug().
+		Str("handle", c.handleName).
+		Msg("recving on")
+
+	var (
+		eth layers.Ethernet
+		ip4 layers.IPv4
+		ip6 layers.IPv6
+		tcp layers.TCP
+
+		parser = gopacket.NewDecodingLayerParser(layers.LayerTypeEthernet, &eth, &ip4, &ip6, &tcp)
+
+		decodedLayers = make([]gopacket.LayerType, 0, 6)
+	)
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+			data, _, err := c.handle.ReadPacketData()
+			if err != nil {
+				c.Log.Debug().Err(err).Msg("failed to get packet")
+				continue
+			}
+			err = parser.DecodeLayers(data, &decodedLayers)
+			if err != nil {
+				c.Log.Trace().Err(err).Msg("failed to decode packet")
+				// we don't continue here because we dont unmarshal the TLS layer
+				// so we may end up getting tls data here that we don't want
+			}
+			// TODO: handle ip6
+			var (
+				ipMe, _   = netaddr.FromStdIP(ip4.DstIP)
+				ipThem, _ = netaddr.FromStdIP(ip4.SrcIP)
+				portMe    = tcp.DstPort
+				portThem  = tcp.SrcPort
+				me        = src{
+					tup: tup{
+						ip:   ipMe,
+						port: uint16(portMe),
+					},
+				}
+				them = Dst{
+					tup: tup{
+						ip:   ipThem,
+						port: uint16(portThem),
+					},
+				}
+				// seqnoThem = tcp.Seq
+				seqnoMe = tcp.Ack
+				cookie  = SynCookieV4(me, them, entropySeed)
+			)
+			if me != c.src {
+				c.Log.Trace().
+					Str("me", me.String()).
+					Str("them", them.String()).
+					Msg("not our packet")
+				continue
+			}
+
+			if uint32(cookie) != seqnoMe-1 {
+				c.Log.Trace().
+					Str("me", me.String()).
+					Str("them", them.String()).
+					Uint32("cookie", uint32(cookie)).
+					Uint32("gotcookie", seqnoMe-1).
+					Msg("failed to decode packet")
+				continue
+			}
+
+			if tcp.SYN && tcp.ACK {
+				c.Log.Info().Str("them", them.String()).Msg("port open")
+			} else if tcp.RST {
+				c.Log.Info().Str("them", them.String()).Msg("port closed")
+			}
+		}
+	}
+}
+
+// Run will initialize the threads needed for performing port scanning. Inputs are expected to be provided
+// using the input channel and results will be returned with the out channel.
+// Run can be terminated by either closing the input channel, or by cancelling the context
+// Closing the input channel will trigger a graceful termination where any inflight packets will be
+// awaited for before closing the output channel
+// Cancelling the context will trigger a non-graceful force shutdown of the worker
+func Run(ctx context.Context, iface string, log zerolog.Logger) (in <-chan Dst, out chan<- Res, err error) {
+	ctx, cancel := context.WithCancel(ctx)
+	log.Debug().Msg("starting")
+
+	results := make(chan Res, 1000)
+	in = make(chan Dst, 1000)
+
+	c, err := New(iface, log)
+	if err != nil {
+		return nil, nil, errors.Wrap(err, "failed to create Client")
+	}
+
+	defer c.Close()
+	log.Debug().Msgf("Client initialized: %+v", c)
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		c.sender(ctx, in)
+
+		log.Info().Msg("waiting 5s for timeouts")
+		time.Sleep(5 * time.Second)
+		cancel()
+	}()
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		c.recver(ctx)
+		log.Debug().Msg("exiting recver")
+
+		close(results)
+	}()
+
+	log.Debug().Msg("completing main loop")
+
+	return in, results, nil
+}
