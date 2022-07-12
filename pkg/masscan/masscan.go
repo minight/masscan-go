@@ -3,7 +3,6 @@ package masscan
 import (
 	"context"
 	"encoding/binary"
-	"fmt"
 	"github.com/dchest/siphash"
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
@@ -12,7 +11,6 @@ import (
 	"github.com/pkg/errors"
 	"github.com/rs/zerolog"
 	"inet.af/netaddr"
-	"math/rand"
 	"net"
 	"strings"
 	"sync"
@@ -20,100 +18,12 @@ import (
 )
 
 const (
+	// we use cloudflare as our default attempt to get an ARP response
 	arpDst4 = "1.1.1.1"
 	arpDst6 = "2606:4700:4700::1111"
 
 	entropySeed = 1
 )
-
-type Port = uint16
-
-type tup struct {
-	ip   netaddr.IP
-	port Port
-}
-
-type Dst struct {
-	tup
-}
-
-type Targets struct {
-	IPs      []netaddr.IP
-	Ports    []Port
-	shuffled bool
-}
-
-func (t Targets) IsEmpty() bool {
-	return len(t.IPs) == 0 && len(t.Ports) == 0
-}
-
-func (t Targets) MaxIdx() uint64 {
-	return uint64(int64(len(t.IPs) * len(t.Ports)))
-}
-
-// Shuffle will randomize the order of the IPs in the list
-// This is an inplace 0 allocation shuffle, so can be used to reorder all
-// of the packets sent to different hosts
-func (t *Targets) Shuffle() {
-	if t.shuffled {
-		return
-	}
-
-	t.shuffled = true
-
-	shuffler := rand.New(rand.NewSource(time.Now().UnixNano()))
-	shuffler.Shuffle(len(t.IPs), func(i, j int) { t.IPs[i], t.IPs[j] = t.IPs[j], t.IPs[i] })
-}
-
-// Get will return the corresponding Dst from the targets list
-// based off the size. This will always return a valid value
-// If the value exceeds MaxIdx, then it will loop around and restart
-// from 0
-// This ordering should yield a "random" ordering of the ports and hosts
-// which should be a sufficient distribution to not dos any services
-func (t Targets) Get(i uint64) Dst {
-	if i > t.MaxIdx() {
-		i = i % t.MaxIdx()
-	}
-
-	ipIdx := i % uint64(len(t.IPs))
-	ipLoop := i / uint64(len(t.IPs))
-	portIdx := (ipLoop + ipIdx) % uint64(len(t.Ports))
-	return Dst{
-		tup{
-			ip:   t.IPs[ipIdx],
-			port: t.Ports[portIdx],
-		},
-	}
-}
-
-type ResultState int
-
-const (
-	ResultState_UNKNOWN ResultState = iota
-	ResultState_OPEN
-	ResultState_CLOSE
-)
-
-type Res struct {
-	dst   Dst
-	state ResultState
-}
-
-type src struct {
-	tup
-}
-
-func (t tup) String() string {
-	return fmt.Sprintf("%s:%d", t.ip.String(), t.port)
-}
-
-func (t *tup) Nil() bool {
-	if t == nil {
-		return true
-	}
-	return t.port == 0 && t.ip.IsZero()
-}
 
 type netHandle struct {
 	handle *pcap.Handle
@@ -129,9 +39,9 @@ func buildcookie(src src, dst Dst, buf []byte) []byte {
 	binary.LittleEndian.PutUint16(tmp, src.port)
 	buf = append(buf, tmp...)
 
-	dstip := dst.ip.As16()
+	dstip := dst.IP.As16()
 	buf = append(buf, dstip[:]...)
-	binary.LittleEndian.PutUint16(tmp, dst.port)
+	binary.LittleEndian.PutUint16(tmp, dst.Port)
 	buf = append(buf, tmp...)
 	return buf
 }
@@ -146,9 +56,9 @@ func buildcookie2(src src, dst Dst, buf []byte) {
 	copy(buf[0:16], srcip[:])
 	binary.LittleEndian.PutUint16(buf[16:18], src.port)
 
-	dstip := dst.ip.As16()
+	dstip := dst.IP.As16()
 	copy(buf[18:34], dstip[:])
-	binary.LittleEndian.PutUint16(buf[34:36], dst.port)
+	binary.LittleEndian.PutUint16(buf[34:36], dst.Port)
 }
 
 type SynCookie uint64
@@ -165,13 +75,13 @@ func (c *Client) AppendPacket(src src, dst Dst, cookie SynCookie) {
 		TTL:      64,
 		Protocol: layers.IPProtocolTCP,
 		SrcIP:    src.ip.IPAddr().IP,
-		DstIP:    dst.ip.IPAddr().IP,
+		DstIP:    dst.IP.IPAddr().IP,
 		Version:  4,
 	}
 
 	tcp := &layers.TCP{
 		SrcPort: layers.TCPPort(src.port),
-		DstPort: layers.TCPPort(dst.port),
+		DstPort: layers.TCPPort(dst.Port),
 		SYN:     true,
 		Seq:     uint32(cookie),
 	}
@@ -180,9 +90,9 @@ func (c *Client) AppendPacket(src src, dst Dst, cookie SynCookie) {
 		Str("srcMAC", c.srcMAC.String()).
 		Str("dstMAC", c.dstMAC.String()).
 		Uint16("srcPort", src.port).
-		Uint16("dstPort", dst.port).
+		Uint16("dstPort", dst.Port).
 		Str("srcIP", src.ip.String()).
-		Str("dstIP", dst.ip.String()).
+		Str("dstIP", dst.IP.String()).
 		Msg("sending packet")
 
 	tcp.SetNetworkLayerForChecksum(ip4)
@@ -226,7 +136,7 @@ type Client struct {
 // we shameless "borrow" this code from gopacket/examples/synscan/main.go
 func (c *Client) getHwAddr() (srcIP net.IP, src net.HardwareAddr, dst net.HardwareAddr, err error) {
 	start := time.Now()
-	// we do a fixed lookup for some random ip address. This should hopefully respond. i have no idea
+	// we do a fixed lookup for some random IP address. This should hopefully respond. i have no idea
 	// Prepare the layers to send for an ARP request.
 	srcMac, err := net.InterfaceByName(c.handleName)
 	if err != nil {
@@ -234,7 +144,11 @@ func (c *Client) getHwAddr() (srcIP net.IP, src net.HardwareAddr, dst net.Hardwa
 	}
 	srcAddrs, err := srcMac.Addrs()
 	if err != nil {
-		return nil, nil, nil, errors.Wrap(err, "failed to get hardware ip")
+		return nil, nil, nil, errors.Wrap(err, "failed to get hardware IP")
+	}
+
+	if len(srcAddrs) == 0 {
+		return nil, nil, nil, errors.New("no hardware addrs found")
 	}
 
 	c.Log.Debug().
@@ -242,19 +156,35 @@ func (c *Client) getHwAddr() (srcIP net.IP, src net.HardwareAddr, dst net.Hardwa
 	var (
 		arpDstAddr, srcAddr string
 		srcAddrByte         net.IP
+		ip4Ifaces           []net.IP
+		ip6Ifaces           []net.IP
 	)
+
 	for _, v := range srcAddrs {
 		srcAddr = v.String()
+		c.Log.Trace().Str("addr", v.String()).Msg("found iface")
 		if strings.ContainsAny(v.String(), ":") {
 			// skip ip6 for now to get it working on ip4
-			arpDstAddr = arpDst6
-			srcAddrByte = v.(*net.IPNet).IP
-			continue
+			ip6Ifaces = append(ip6Ifaces, v.(*net.IPNet).IP)
 		} else {
 			arpDstAddr = arpDst4
-			srcAddrByte = v.(*net.IPNet).IP
+			ip4Ifaces = append(ip4Ifaces, v.(*net.IPNet).IP)
 		}
 	}
+	if len(ip4Ifaces) == 0 {
+		// this is where we have no ip4 addresess and only ip6. so just pick ip6
+		// TODO: handle ip4 and ip6 separately with two separate listeners
+		// this must mean that there is at least 1 ip6 addr
+		// so we'll pick the first one
+		srcAddrByte = ip6Ifaces[0]
+		arpDstAddr = arpDst6
+		c.Log.Info().Str("addr", srcAddrByte.String()).Msg("no ip4 ifaces, so we'll pick ip6")
+	} else {
+		srcAddrByte = ip4Ifaces[0]
+		arpDstAddr = arpDst4
+		c.Log.Info().Str("addr", srcAddrByte.String()).Msg("selected iface")
+	}
+
 	// remove the cidr
 	srcAddr, _, _ = strings.Cut(srcAddr, "/")
 
@@ -389,9 +319,9 @@ func New(iface string, log zerolog.Logger) (*Client, error) {
 			ComputeChecksums: true,
 		},
 		buf: gopacket.NewSerializeBuffer(),
-		src: src{tup{
+		src: src{
 			port: 42069,
-		}},
+		},
 		Log: log.With().Str("ctx", "masscan").Logger(),
 	}
 	var tmpip net.IP
@@ -426,8 +356,8 @@ loop:
 			}
 
 			c.Log.Debug().
-				Str("host", t.ip.String()).
-				Uint16("port", t.port).
+				Str("host", t.IP.String()).
+				Uint16("Port", t.Port).
 				Msg("sending")
 			cookie := SynCookieV4(c.src, t, entropySeed)
 			c.AppendPacket(c.src, t, cookie)
@@ -437,15 +367,15 @@ loop:
 				Msg("writing data")
 			if err := c.handle.WritePacketData(tmp); err != nil {
 				c.Log.Error().
-					Str("host", t.ip.String()).
-					Uint16("port", t.port).
+					Str("host", t.IP.String()).
+					Uint16("Port", t.Port).
 					Err(err).
 					Msg("failed to write packet data")
 			}
 			if err := c.buf.Clear(); err != nil {
 				c.Log.Error().
-					Str("host", t.ip.String()).
-					Uint16("port", t.port).
+					Str("host", t.IP.String()).
+					Uint16("Port", t.Port).
 					Err(err).
 					Msg("failed to clear the buffer")
 
@@ -494,16 +424,12 @@ func (c *Client) recver(ctx context.Context) {
 				portMe    = tcp.DstPort
 				portThem  = tcp.SrcPort
 				me        = src{
-					tup: tup{
-						ip:   ipMe,
-						port: uint16(portMe),
-					},
+					ip:   ipMe,
+					port: uint16(portMe),
 				}
 				them = Dst{
-					tup: tup{
-						ip:   ipThem,
-						port: uint16(portThem),
-					},
+					IP:   ipThem,
+					Port: uint16(portThem),
 				}
 				// seqnoThem = tcp.Seq
 				seqnoMe = tcp.Ack
@@ -528,33 +454,33 @@ func (c *Client) recver(ctx context.Context) {
 			}
 
 			if tcp.SYN && tcp.ACK {
-				c.Log.Info().Str("them", them.String()).Msg("port open")
+				c.Log.Info().Str("them", them.String()).Msg("Port open")
 			} else if tcp.RST {
-				c.Log.Info().Str("them", them.String()).Msg("port closed")
+				c.Log.Info().Str("them", them.String()).Msg("Port closed")
 			}
 		}
 	}
 }
 
-// Run will initialize the threads needed for performing port scanning. Inputs are expected to be provided
+// Run will initialize the threads needed for performing Port scanning. Inputs are expected to be provided
 // using the input channel and results will be returned with the out channel.
 // Run can be terminated by either closing the input channel, or by cancelling the context
 // Closing the input channel will trigger a graceful termination where any inflight packets will be
 // awaited for before closing the output channel
 // Cancelling the context will trigger a non-graceful force shutdown of the worker
-func Run(ctx context.Context, iface string, log zerolog.Logger) (in <-chan Dst, out chan<- Res, err error) {
+func Run(ctx context.Context, iface string, log zerolog.Logger) (chan<- Dst, <-chan Res, error) {
 	ctx, cancel := context.WithCancel(ctx)
 	log.Debug().Msg("starting")
 
 	results := make(chan Res, 1000)
-	in = make(chan Dst, 1000)
+	in := make(chan Dst, 1000)
 
 	c, err := New(iface, log)
 	if err != nil {
 		return nil, nil, errors.Wrap(err, "failed to create Client")
 	}
 
-	defer c.Close()
+	// TODO: expose a closable interface defer c.Close()
 	log.Debug().Msgf("Client initialized: %+v", c)
 
 	var wg sync.WaitGroup

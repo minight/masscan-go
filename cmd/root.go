@@ -14,6 +14,8 @@ import (
 var (
 	loglevel  string = "info"
 	logformat string = "pretty"
+	input     string = ""
+	ports     []uint
 )
 
 // rootCmd represents the base command when called without any subcommands
@@ -29,7 +31,7 @@ to quickly create a Cobra application.`,
 	// Uncomment the following line if your bare application
 	// has an action associated with it:
 	Run: func(cmd *cobra.Command, args []string) {
-		c.Run(loglevel, logformat)
+		c.Run(loglevel, logformat, input, ports)
 	},
 }
 
@@ -53,5 +55,7 @@ func init() {
 	// when this action is called directly.
 	rootCmd.Flags().StringVarP(&loglevel, "loglevel", "v", loglevel, "Log level: trace,debug,info,error")
 	rootCmd.Flags().StringVarP(&logformat, "logformat", "o", logformat, "Log format: json,pretty,text")
+	rootCmd.Flags().StringVarP(&input, "input", "i", "", "input file. if its - then we read from stdin")
+	rootCmd.Flags().UintSliceVarP(&ports, "ports", "p", ports, "ports to scan for")
 	rootCmd.Flags().BoolP("toggle", "t", false, "Help message for toggle")
 }

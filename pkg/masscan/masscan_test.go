@@ -9,8 +9,8 @@ import (
 )
 
 func Test_buildcookie(t *testing.T) {
-	src := src{tup: tup{ip: netaddr.IPFrom4([4]byte{127, 0, 0, 1}), port: 443}}
-	dst := Dst{tup: tup{ip: netaddr.IPFrom4([4]byte{192, 168, 68, 101}), port: 80}}
+	src := src{ip: netaddr.IPFrom4([4]byte{127, 0, 0, 1}), port: 443}
+	dst := Dst{IP: netaddr.IPFrom4([4]byte{192, 168, 68, 101}), Port: 80}
 	buf2 := [36]byte{}
 	buf1 := buildcookie(src, dst, nil)
 	buildcookie2(src, dst, buf2[:])
@@ -21,8 +21,8 @@ var result []byte
 
 func BenchmarkBuildCookie1(b *testing.B) {
 	buf := make([]byte, 0, 36)
-	src := src{tup: tup{ip: netaddr.IPFrom4([4]byte{127, 0, 0, 1}), port: 443}}
-	dst := Dst{tup: tup{ip: netaddr.IPFrom4([4]byte{192, 168, 68, 101}), port: 80}}
+	src := src{ip: netaddr.IPFrom4([4]byte{127, 0, 0, 1}), port: 443}
+	dst := Dst{IP: netaddr.IPFrom4([4]byte{192, 168, 68, 101}), Port: 80}
 	for i := 0; i < b.N; i++ {
 		buf = buildcookie(src, dst, buf)
 		buf = buf[:0]
@@ -32,8 +32,8 @@ func BenchmarkBuildCookie1(b *testing.B) {
 
 func BenchmarkBuildCookie2(b *testing.B) {
 	buf2 := [36]byte{}
-	src := src{tup: tup{ip: netaddr.IPFrom4([4]byte{127, 0, 0, 1}), port: 443}}
-	dst := Dst{tup: tup{ip: netaddr.IPFrom4([4]byte{192, 168, 68, 101}), port: 80}}
+	src := src{ip: netaddr.IPFrom4([4]byte{127, 0, 0, 1}), port: 443}
+	dst := Dst{IP: netaddr.IPFrom4([4]byte{192, 168, 68, 101}), Port: 80}
 	for i := 0; i < b.N; i++ {
 		buildcookie2(src, dst, buf2[:])
 	}
