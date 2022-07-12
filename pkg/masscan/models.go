@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"inet.af/netaddr"
 	"math/rand"
-	"time"
 )
 
 type Port = uint16
@@ -70,7 +69,7 @@ func (t Targets) MaxIdx() uint64 {
 	return uint64(int64(len(t.IPs) * len(t.Ports)))
 }
 
-// Shuffle will randomize the order of the IPs in the list
+// Shuffle will randomize the order of the IPs and ports in the list
 // This is an inplace 0 allocation shuffle, so can be used to reorder all
 // of the packets sent to different hosts
 func (t *Targets) Shuffle() {
@@ -80,8 +79,11 @@ func (t *Targets) Shuffle() {
 
 	t.shuffled = true
 
-	shuffler := rand.New(rand.NewSource(time.Now().UnixNano()))
+	shuffler := rand.New(rand.NewSource(entropySeed))
 	shuffler.Shuffle(len(t.IPs), func(i, j int) { t.IPs[i], t.IPs[j] = t.IPs[j], t.IPs[i] })
+
+	shuffler = rand.New(rand.NewSource(entropySeed))
+	shuffler.Shuffle(len(t.Ports), func(i, j int) { t.Ports[i], t.Ports[j] = t.Ports[j], t.Ports[i] })
 }
 
 // Get will return the corresponding Dst from the targets list

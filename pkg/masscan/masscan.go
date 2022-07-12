@@ -25,12 +25,6 @@ const (
 	entropySeed = 1
 )
 
-type netHandle struct {
-	handle *pcap.Handle
-	name   string
-	src    src
-}
-
 func buildcookie(src src, dst Dst, buf []byte) []byte {
 	srcip := src.ip.As16()
 	buf = append(buf, srcip[:]...)
@@ -340,7 +334,7 @@ func (c *Client) Close() error {
 	return nil
 }
 
-func (c *Client) sender(ctx context.Context, in <-chan Dst) {
+func (c *Client) sender(ctx context.Context, in <-chan Targets) {
 	c.Log.Debug().
 		Str("handle", c.handleName).
 		Msg("sending on")
@@ -350,36 +344,40 @@ loop:
 		select {
 		case <-ctx.Done():
 			return
-		case t, ok := <-in:
-			if t.Nil() && !ok {
+		case tg, ok := <-in:
+			if tg.IsEmpty() && !ok {
 				break loop
 			}
-
-			c.Log.Debug().
-				Str("host", t.IP.String()).
-				Uint16("Port", t.Port).
-				Msg("sending")
-			cookie := SynCookieV4(c.src, t, entropySeed)
-			c.AppendPacket(c.src, t, cookie)
-			tmp := c.buf.Bytes()
-			c.Log.Trace().
-				Bytes("packet", tmp).
-				Msg("writing data")
-			if err := c.handle.WritePacketData(tmp); err != nil {
-				c.Log.Error().
+			var i uint64
+			for i = 0; i < tg.MaxIdx(); i++ {
+				t := tg.Get(i)
+				c.Log.Debug().
 					Str("host", t.IP.String()).
 					Uint16("Port", t.Port).
-					Err(err).
-					Msg("failed to write packet data")
-			}
-			if err := c.buf.Clear(); err != nil {
-				c.Log.Error().
-					Str("host", t.IP.String()).
-					Uint16("Port", t.Port).
-					Err(err).
-					Msg("failed to clear the buffer")
+					Msg("sending")
+				cookie := SynCookieV4(c.src, t, entropySeed)
+				c.AppendPacket(c.src, t, cookie)
+				tmp := c.buf.Bytes()
+				c.Log.Trace().
+					Bytes("packet", tmp).
+					Msg("writing data")
+				if err := c.handle.WritePacketData(tmp); err != nil {
+					c.Log.Error().
+						Str("host", t.IP.String()).
+						Uint16("Port", t.Port).
+						Err(err).
+						Msg("failed to write packet data")
+				}
+				if err := c.buf.Clear(); err != nil {
+					c.Log.Error().
+						Str("host", t.IP.String()).
+						Uint16("Port", t.Port).
+						Err(err).
+						Msg("failed to clear the buffer")
 
+				}
 			}
+
 		}
 	}
 	c.Log.Debug().Msg("exiting sender")
@@ -439,7 +437,7 @@ func (c *Client) recver(ctx context.Context) {
 				c.Log.Trace().
 					Str("me", me.String()).
 					Str("them", them.String()).
-					Msg("not our packet")
+					Msg("not our packet. non-matching src")
 				continue
 			}
 
@@ -468,12 +466,12 @@ func (c *Client) recver(ctx context.Context) {
 // Closing the input channel will trigger a graceful termination where any inflight packets will be
 // awaited for before closing the output channel
 // Cancelling the context will trigger a non-graceful force shutdown of the worker
-func Run(ctx context.Context, iface string, log zerolog.Logger) (chan<- Dst, <-chan Res, error) {
+func Run(ctx context.Context, iface string, log zerolog.Logger) (chan<- Targets, <-chan Res, error) {
 	ctx, cancel := context.WithCancel(ctx)
 	log.Debug().Msg("starting")
 
 	results := make(chan Res, 1000)
-	in := make(chan Dst, 1000)
+	in := make(chan Targets, 1000)
 
 	c, err := New(iface, log)
 	if err != nil {
@@ -481,6 +479,7 @@ func Run(ctx context.Context, iface string, log zerolog.Logger) (chan<- Dst, <-c
 	}
 
 	// TODO: expose a closable interface defer c.Close()
+	// otherwise we just leak memory
 	log.Debug().Msgf("Client initialized: %+v", c)
 
 	var wg sync.WaitGroup

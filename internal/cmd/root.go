@@ -46,7 +46,7 @@ func Run(loglevel string, logformat string, input string, ports []uint) {
 	wg.Wait()
 }
 
-func ReadInputTo(ctx context.Context, log zerolog.Logger, input string, ports []uint16, out chan<- masscan.Dst) error {
+func ReadInputTo(ctx context.Context, log zerolog.Logger, input string, ports []uint16, out chan<- masscan.Targets) error {
 	log.Trace().Msg("starting input reader")
 
 	defer func() {
@@ -73,49 +73,42 @@ func ReadInputTo(ctx context.Context, log zerolog.Logger, input string, ports []
 	return nil
 }
 
-func PrepareDst(log zerolog.Logger, in []string, port []uint16) (ret []masscan.Dst) {
+func PrepareDst(log zerolog.Logger, in []string, ports []uint16) (ret masscan.Targets) {
+	ret.Ports = ports
 	for _, v := range in {
 		ip, err := netaddr.ParseIP(v)
 		if err != nil {
 			log.Error().Err(err).Msg("failed to parse ip address")
 			continue
 		}
-		r := masscan.Dst{
-			Port: 443,
-			IP:   ip,
-		}
 
-		ret = append(ret, r)
+		ret.IPs = append(ret.IPs, ip)
 	}
 	return ret
 }
 
-func ReadScannerTo(ctx context.Context, log zerolog.Logger, r *bufio.Scanner, ports []uint16, out chan<- masscan.Dst) error {
+func ReadScannerTo(ctx context.Context, log zerolog.Logger, r *bufio.Scanner, ports []uint16, out chan<- masscan.Targets) error {
 	lines := make([]string, 0)
 	for r.Scan() {
 		line := r.Text()
 		lines = append(lines, line)
 		if len(lines) > MaxChunkSize {
-			for _, vv := range PrepareDst(log, lines, ports) {
-				select {
-				case <-ctx.Done():
-					return nil
-				case out <- vv:
-					log.Trace().Str("ip", vv.IP.String()).Msg("scheduling")
-				}
+			select {
+			case <-ctx.Done():
+				return nil
+			case out <- PrepareDst(log, lines, ports):
+				log.Trace().Msg("scheduling")
 			}
 			lines = lines[:0]
 		}
 	}
 
 	if len(lines) > 0 {
-		for _, vv := range PrepareDst(log, lines, ports) {
-			select {
-			case <-ctx.Done():
-				return nil
-			case out <- vv:
-				log.Trace().Str("ip", vv.IP.String()).Msg("scheduling")
-			}
+		select {
+		case <-ctx.Done():
+			return nil
+		case out <- PrepareDst(log, lines, ports):
+			log.Trace().Msg("scheduling")
 		}
 	}
 
