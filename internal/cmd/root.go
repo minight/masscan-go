@@ -55,17 +55,17 @@ func ReadInputTo(ctx context.Context, log zerolog.Logger, input string, ports []
 		close(out)
 	}()
 	var err error
-	if input == "-" {
-		f, err := os.Open(input)
+	f := os.Stdin
+	if input != "-" {
+		log.Info().Str("filename", input).Msg("reading from file")
+		f, err = os.Open(input)
 		if err != nil {
 			return errors.Wrap(err, "failed to open file")
 		}
-		r := bufio.NewScanner(f)
-		err = ReadScannerTo(ctx, log, r, ports, out)
 	} else {
-		r := bufio.NewScanner(os.Stdin)
-		err = ReadScannerTo(ctx, log, r, ports, out)
+		log.Info().Msg("reading from stdin")
 	}
+	err = ReadScannerTo(ctx, log, bufio.NewScanner(f), ports, out)
 	if err != nil {
 		return errors.Wrap(err, "failed to read scanner to")
 	}
@@ -128,7 +128,7 @@ func WriteResultsFrom(ctx context.Context, log zerolog.Logger, in <-chan masscan
 			}
 			log.Info().Str("ip", v.Dst.IP.String()).
 				Uint16("port", v.Dst.Port).
-				Str("state", "open").Send()
+				Str("state", v.State.String()).Send()
 		}
 	}
 

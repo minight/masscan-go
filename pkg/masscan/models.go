@@ -24,6 +24,7 @@ func (d *Dst) Nil() bool {
 	return d.Port == 0 && d.IP.IsZero()
 }
 
+//go:generate stringer -type=ResultState
 type ResultState int
 
 const (

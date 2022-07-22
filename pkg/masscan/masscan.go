@@ -383,7 +383,7 @@ loop:
 	c.Log.Debug().Msg("exiting sender")
 }
 
-func (c *Client) recver(ctx context.Context) {
+func (c *Client) recver(ctx context.Context, out chan Res) {
 	c.Log.Debug().
 		Str("handle", c.handleName).
 		Msg("recving on")
@@ -452,9 +452,17 @@ func (c *Client) recver(ctx context.Context) {
 			}
 
 			if tcp.SYN && tcp.ACK {
+				out <- Res{
+					Dst:   them,
+					State: ResultState_OPEN,
+				}
 				c.Log.Info().Str("them", them.String()).Msg("Port open")
 			} else if tcp.RST {
 				c.Log.Info().Str("them", them.String()).Msg("Port closed")
+				out <- Res{
+					Dst:   them,
+					State: ResultState_CLOSE,
+				}
 			}
 		}
 	}
@@ -496,7 +504,7 @@ func Run(ctx context.Context, iface string, log zerolog.Logger) (chan<- Targets,
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		c.recver(ctx)
+		c.recver(ctx, results)
 		log.Debug().Msg("exiting recver")
 
 		close(results)

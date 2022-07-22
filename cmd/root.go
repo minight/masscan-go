@@ -12,7 +12,7 @@ import (
 var (
 	loglevel  string = "info"
 	logformat string = "pretty"
-	input     string = ""
+	input     string = "-"
 	ports     []uint = convert.ConvertSlice[uint16, uint](masscan.DefaultPorts)
 )
 
@@ -37,6 +37,6 @@ func Execute() {
 func init() {
 	rootCmd.Flags().StringVarP(&loglevel, "loglevel", "v", loglevel, "Log level: trace,debug,info,error")
 	rootCmd.Flags().StringVarP(&logformat, "logformat", "o", logformat, "Log format: json,pretty,text")
-	rootCmd.Flags().StringVarP(&input, "input", "i", "", "input file. if its - then we read from stdin")
+	rootCmd.Flags().StringVarP(&input, "input", "i", input, "input file. if its - then we read from stdin")
 	rootCmd.Flags().UintSliceVarP(&ports, "ports", "p", ports, "ports to scan for")
 }
