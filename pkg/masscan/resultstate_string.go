@@ -13,9 +13,9 @@ func _() {
 	_ = x[ResultState_CLOSE-2]
 }
 
-const _ResultState_name = "ResultState_UNKNOWNResultState_OPENResultState_CLOSE"
+const _ResultState_name = "UNKNOWNOPENCLOSE"
 
-var _ResultState_index = [...]uint8{0, 19, 35, 52}
+var _ResultState_index = [...]uint8{0, 7, 11, 16}
 
 func (i ResultState) String() string {
 	if i < 0 || i >= ResultState(len(_ResultState_index)-1) {
