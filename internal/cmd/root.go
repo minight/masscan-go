@@ -3,21 +3,22 @@ package cmd
 import (
 	"bufio"
 	"context"
+	"os"
+	"sync"
+
 	"github.com/minight/masscan-go/pkg/convert"
 	"github.com/minight/masscan-go/pkg/log"
 	"github.com/minight/masscan-go/pkg/masscan"
 	"github.com/pkg/errors"
 	"github.com/rs/zerolog"
 	"inet.af/netaddr"
-	"os"
-	"sync"
 )
 
 const (
 	MaxChunkSize = 1000
 )
 
-func Run(loglevel string, logformat string, input string, ports []uint) {
+func Run(loglevel string, logformat string, input string, ports []uint, rate int) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	log, err := log.SetupLogger(loglevel, logformat)
@@ -25,7 +26,7 @@ func Run(loglevel string, logformat string, input string, ports []uint) {
 		log.Fatal().Err(err).Msg("failed to setup logger")
 	}
 
-	in, out, err := masscan.Run(ctx, "en0", log)
+	in, out, err := masscan.Run(ctx, "en0", log, rate)
 	if err != nil {
 		log.Fatal().Err(err).Msg("failed to run")
 	}

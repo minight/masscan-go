@@ -3,6 +3,11 @@ package masscan
 import (
 	"context"
 	"encoding/binary"
+	"net"
+	"strings"
+	"sync"
+	"time"
+
 	"github.com/dchest/siphash"
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
@@ -10,11 +15,8 @@ import (
 	"github.com/jackpal/gateway"
 	"github.com/pkg/errors"
 	"github.com/rs/zerolog"
+	"go.uber.org/ratelimit"
 	"inet.af/netaddr"
-	"net"
-	"strings"
-	"sync"
-	"time"
 )
 
 const (
@@ -119,7 +121,8 @@ type Client struct {
 
 	srcMAC, dstMAC net.HardwareAddr
 
-	Log zerolog.Logger
+	ratelimit ratelimit.Limiter
+	Log       zerolog.Logger
 }
 
 // getHwAddr is a hacky but effective way to get the destination hardware
@@ -255,7 +258,7 @@ func (c *Client) send(l ...gopacket.SerializableLayer) error {
 	return c.handle.WritePacketData(c.buf.Bytes())
 }
 
-func New(iface string, log zerolog.Logger) (*Client, error) {
+func New(iface string, log zerolog.Logger, rate int) (*Client, error) {
 	sublog := log.With().
 		Str("ctx", "clientInit").
 		Logger()
@@ -326,6 +329,12 @@ func New(iface string, log zerolog.Logger) (*Client, error) {
 
 	c.src.ip, _ = netaddr.FromStdIP(tmpip)
 
+	if rate == 0 {
+		c.ratelimit = ratelimit.NewUnlimited()
+	} else {
+		c.ratelimit = ratelimit.New(rate, ratelimit.WithoutSlack)
+	}
+
 	return c, nil
 }
 
@@ -357,9 +366,12 @@ loop:
 					Msg("sending")
 				cookie := SynCookieV4(c.src, t, entropySeed)
 				c.AppendPacket(c.src, t, cookie)
+
+				wait := c.ratelimit.Take()
 				tmp := c.buf.Bytes()
 				c.Log.Trace().
 					Bytes("packet", tmp).
+					Time("ratelimit", wait).
 					Msg("writing data")
 				if err := c.handle.WritePacketData(tmp); err != nil {
 					c.Log.Error().
@@ -456,9 +468,9 @@ func (c *Client) recver(ctx context.Context, out chan Res) {
 					Dst:   them,
 					State: ResultState_OPEN,
 				}
-				c.Log.Info().Str("them", them.String()).Msg("Port open")
+				c.Log.Debug().Str("them", them.String()).Msg("Port open")
 			} else if tcp.RST {
-				c.Log.Info().Str("them", them.String()).Msg("Port closed")
+				c.Log.Debug().Str("them", them.String()).Msg("Port closed")
 				out <- Res{
 					Dst:   them,
 					State: ResultState_CLOSE,
@@ -474,14 +486,14 @@ func (c *Client) recver(ctx context.Context, out chan Res) {
 // Closing the input channel will trigger a graceful termination where any inflight packets will be
 // awaited for before closing the output channel
 // Cancelling the context will trigger a non-graceful force shutdown of the worker
-func Run(ctx context.Context, iface string, log zerolog.Logger) (chan<- Targets, <-chan Res, error) {
+func Run(ctx context.Context, iface string, log zerolog.Logger, rate int) (chan<- Targets, <-chan Res, error) {
 	ctx, cancel := context.WithCancel(ctx)
 	log.Debug().Msg("starting")
 
 	results := make(chan Res, 1000)
 	in := make(chan Targets, 1000)
 
-	c, err := New(iface, log)
+	c, err := New(iface, log, rate)
 	if err != nil {
 		return nil, nil, errors.Wrap(err, "failed to create Client")
 	}
