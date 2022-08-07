@@ -86,17 +86,44 @@ func ReadInputTo(ctx context.Context, log zerolog.Logger, input string, ports []
 }
 
 // PrepareDst will convert the in slice and ports into the appropriate format for masscan
-func PrepareDst(log zerolog.Logger, in []string, ports []uint16) (ret masscan.Targets) {
-	ret.Ports = ports
+// this will chunk the targets into reasonable sizes where they give us a huge fuckoff cidr
+func PrepareDst(log zerolog.Logger, in []string, ports []uint16, chunkSize int) (ret []masscan.Targets) {
+	t := masscan.Targets{
+		Ports: ports,
+	}
 	for _, v := range in {
-		ip, err := netaddr.ParseIP(v)
+		var iprange netaddr.IPRange
+		ipprefix, err := netaddr.ParseIPPrefix(v)
 		if err != nil {
-			log.Error().Err(err).Msg("failed to parse ip address")
-			continue
+			// its not an iprange, consider it a normal ip addres
+			ipaddr, err2 := netaddr.ParseIP(v)
+			if err2 != nil {
+				// we failed both so skip
+				log.Error().Errs("errors", []error{err, err2}).Msg("failed to parse ip address")
+				continue
+			}
+			// we will construct an ip range of 1 ip
+			iprange = netaddr.IPRangeFrom(ipaddr, ipaddr)
+		} else {
+			iprange = ipprefix.Range()
 		}
 
-		ret.IPs = append(ret.IPs, ip)
+		// iterate through the ip ranges. Break on the inclusive range, since a /32 is inclusive of 1
+		for i := iprange.From(); i.Compare(iprange.To()) <= 0; i = i.Next() {
+			t.IPs = append(t.IPs, i)
+			if len(t.IPs) >= chunkSize {
+				ret = append(ret, t)
+				t = masscan.Targets{
+					Ports: ports,
+				}
+			}
+		}
 	}
+
+	if len(t.IPs) > 0 {
+		ret = append(ret, t)
+	}
+
 	return ret
 }
 
@@ -108,22 +135,27 @@ func ReadScannerTo(ctx context.Context, log zerolog.Logger, r *bufio.Scanner, po
 		line := r.Text()
 		lines = append(lines, line)
 		if len(lines) > MaxChunkSize {
-			select {
-			case <-ctx.Done():
-				return nil
-			case out <- PrepareDst(log, lines, ports):
-				log.Trace().Msg("scheduling")
+			for _, dst := range PrepareDst(log, lines, ports, MaxChunkSize) {
+				select {
+				case <-ctx.Done():
+					return nil
+				case out <- dst:
+					log.Trace().Msg("scheduling")
+				}
 			}
 			lines = lines[:0]
 		}
 	}
 
 	if len(lines) > 0 {
-		select {
-		case <-ctx.Done():
-			return nil
-		case out <- PrepareDst(log, lines, ports):
-			log.Trace().Msg("scheduling")
+		for _, dst := range PrepareDst(log, lines, ports, MaxChunkSize) {
+			select {
+			case <-ctx.Done():
+				return nil
+			case out <- dst:
+				log.Trace().Msg("scheduling")
+			}
+			lines = lines[:0]
 		}
 	}
 
