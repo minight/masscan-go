@@ -123,6 +123,8 @@ type Client struct {
 
 	ratelimit ratelimit.Limiter
 
+	cache *ttlcache.Cache[Dst, bool]
+
 	// retries is the number of times to send a packet, can be 0.
 	// we don't actually track if we've sent a packet before or whether we should retry
 	// we just employ the masscan strategy of shooting everything off N times, then tracking
@@ -326,6 +328,9 @@ func New(iface string, log zerolog.Logger, rate int, retries int) (*Client, erro
 		src: src{
 			port: 42069,
 		},
+		cache: ttlcache.New[Dst, bool](
+			ttlcache.WithCapacity[Dst, bool](10000),
+		),
 		retries: retries,
 		Log:     log.With().Str("ctx", "masscan").Logger(),
 	}
@@ -477,6 +482,10 @@ func (c *Client) recver(ctx context.Context, out chan Res) (seen int64, age time
 					Msg("failed to decode packet")
 				continue
 			}
+			if c.cache.Get(them) != nil {
+				continue
+			}
+			c.cache.Set(them, true, ttlcache.DefaultTTL)
 
 			if tcp.SYN && tcp.ACK {
 				out <- Res{
