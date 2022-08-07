@@ -122,7 +122,14 @@ type Client struct {
 	srcMAC, dstMAC net.HardwareAddr
 
 	ratelimit ratelimit.Limiter
-	Log       zerolog.Logger
+
+	// retries is the number of times to send a packet, can be 0.
+	// we don't actually track if we've sent a packet before or whether we should retry
+	// we just employ the masscan strategy of shooting everything off N times, then tracking
+	// duplicate responses
+	retries int
+
+	Log zerolog.Logger
 }
 
 // getHwAddr is a hacky but effective way to get the destination hardware
@@ -258,7 +265,7 @@ func (c *Client) send(l ...gopacket.SerializableLayer) error {
 	return c.handle.WritePacketData(c.buf.Bytes())
 }
 
-func New(iface string, log zerolog.Logger, rate int) (*Client, error) {
+func New(iface string, log zerolog.Logger, rate int, retries int) (*Client, error) {
 	sublog := log.With().
 		Str("ctx", "clientInit").
 		Logger()
@@ -319,7 +326,8 @@ func New(iface string, log zerolog.Logger, rate int) (*Client, error) {
 		src: src{
 			port: 42069,
 		},
-		Log: log.With().Str("ctx", "masscan").Logger(),
+		retries: retries,
+		Log:     log.With().Str("ctx", "masscan").Logger(),
 	}
 	var tmpip net.IP
 	tmpip, c.srcMAC, c.dstMAC, err = c.getHwAddr()
@@ -359,8 +367,10 @@ loop:
 			if tg.IsEmpty() && !ok {
 				break loop
 			}
+			// do a little shuffle before we shoot everything out so the order is a bit less predictable
+			tg.Shuffle()
 			var i uint64
-			for i = 0; i < tg.MaxIdx(); i++ {
+			for i = 0; i < tg.MaxIdx()*uint64(1+c.retries); i++ {
 				t := tg.Get(i)
 				c.Log.Debug().
 					Str("host", t.IP.String()).
@@ -498,14 +508,14 @@ func (c *Client) recver(ctx context.Context, out chan Res) (seen int64, age time
 // Closing the input channel will trigger a graceful termination where any inflight packets will be
 // awaited for before closing the output channel
 // Cancelling the context will trigger a non-graceful force shutdown of the worker
-func Run(ctx context.Context, iface string, log zerolog.Logger, rate int) (chan<- Targets, <-chan Res, error) {
+func Run(ctx context.Context, iface string, log zerolog.Logger, rate int, retries int) (chan<- Targets, <-chan Res, error) {
 	ctx, cancel := context.WithCancel(ctx)
 	log.Debug().Msg("starting")
 
 	results := make(chan Res, 1000)
 	in := make(chan Targets, 1000)
 
-	c, err := New(iface, log, rate)
+	c, err := New(iface, log, rate, retries)
 	if err != nil {
 		return nil, nil, errors.Wrap(err, "failed to create Client")
 	}

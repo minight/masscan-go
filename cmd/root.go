@@ -3,10 +3,9 @@ package cmd
 import (
 	"os"
 
+	c "github.com/minight/masscan-go/internal/cmd"
 	"github.com/minight/masscan-go/pkg/convert"
 	"github.com/minight/masscan-go/pkg/masscan"
-
-	c "github.com/minight/masscan-go/internal/cmd"
 	"github.com/spf13/cobra"
 )
 
@@ -15,6 +14,7 @@ var (
 	logformat string = "pretty"
 	input     string = "-"
 	rate      int    = 50000
+	retries   int    = 2
 	ports     []uint
 )
 
@@ -25,10 +25,10 @@ var rootCmd = &cobra.Command{
 	Long: `a go implementation of masscan. only does tcp syn scans
 only works on *nix systems. No banners. just fast tcp scans`,
 	Run: func(cmd *cobra.Command, args []string) {
-		c.Run(loglevel, logformat, input, ports, rate)
 		if len(ports) == 0 {
 			ports = convert.ConvertSlice[uint16, uint](masscan.DefaultPorts)
 		}
+		c.Run(loglevel, logformat, input, ports, rate, retries)
 	},
 }
 
@@ -45,4 +45,5 @@ func init() {
 	rootCmd.Flags().StringVarP(&input, "input", "i", input, "input file. if its - then we read from stdin")
 	rootCmd.Flags().UintSliceVarP(&ports, "ports", "p", ports, "ports to scan for. default is masscan ports (hidden for your sanity)")
 	rootCmd.Flags().IntVarP(&rate, "rate", "x", rate, "maximum packets per second rate")
+	rootCmd.Flags().IntVar(&retries, "retries", retries, "number of retries for ports")
 }
