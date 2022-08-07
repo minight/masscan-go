@@ -14,7 +14,7 @@ var (
 	loglevel  string = "info"
 	logformat string = "pretty"
 	input     string = "-"
-	rate      int    = 20000
+	rate      int    = 50000
 	ports     []uint
 )
 
