@@ -18,7 +18,8 @@ const (
 	MaxChunkSize = 1024
 )
 
-func Run(loglevel string, logformat string, input string, ports []uint, rate int, retries int) {
+func Run(loglevel string, logformat string, iface string, input string, ports []uint, rate int, retries int) {
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	logger, err := log.SetupLogger(loglevel, logformat)
@@ -31,7 +32,7 @@ func Run(loglevel string, logformat string, input string, ports []uint, rate int
 		logger.Fatal().Err(err).Msg("failed to setup resultwriter")
 	}
 
-	in, out, err := masscan.Run(ctx, "en0", logger, rate, retries)
+	in, out, err := masscan.Run(ctx, iface, logger, rate, retries)
 	if err != nil {
 		logger.Fatal().Err(err).Msg("failed to run")
 	}

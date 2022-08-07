@@ -12,6 +12,7 @@ import (
 var (
 	loglevel  string = "info"
 	logformat string = "pretty"
+	iface     string = "en0"
 	input     string = "-"
 	rate      int    = 50000
 	retries   int    = 2
@@ -28,7 +29,7 @@ only works on *nix systems. No banners. just fast tcp scans`,
 		if len(ports) == 0 {
 			ports = convert.ConvertSlice[uint16, uint](masscan.DefaultPorts)
 		}
-		c.Run(loglevel, logformat, input, ports, rate, retries)
+		c.Run(loglevel, logformat, iface, input, ports, rate, retries)
 	},
 }
 
@@ -43,6 +44,7 @@ func init() {
 	rootCmd.Flags().StringVarP(&loglevel, "loglevel", "v", loglevel, "Log level: trace,debug,info,error")
 	rootCmd.Flags().StringVarP(&logformat, "logformat", "o", logformat, "Log format: json,pretty,text")
 	rootCmd.Flags().StringVarP(&input, "input", "i", input, "input file. if its - then we read from stdin")
+	rootCmd.Flags().StringVarP(&iface, "iface", "e", iface, "interface to listen on. Default en0")
 	rootCmd.Flags().UintSliceVarP(&ports, "ports", "p", ports, "ports to scan for. default is masscan ports (hidden for your sanity)")
 	rootCmd.Flags().IntVarP(&rate, "rate", "x", rate, "maximum packets per second rate")
 	rootCmd.Flags().IntVar(&retries, "retries", retries, "number of retries for ports")
