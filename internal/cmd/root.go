@@ -4,18 +4,19 @@ import (
 	"bufio"
 	"context"
 	"os"
+	"runtime/pprof"
 	"sync"
 
 	"github.com/minight/masscan-go/pkg/convert"
 	"github.com/minight/masscan-go/pkg/log"
 	"github.com/minight/masscan-go/pkg/masscan"
+	"github.com/minight/netaddr"
 	"github.com/pkg/errors"
 	"github.com/rs/zerolog"
-	"inet.af/netaddr"
 )
 
 const (
-	MaxChunkSize = 1024
+	MaxChunkSize = 1024 * 32
 )
 
 func Run(loglevel string, logformat string, iface string, input string, ports []uint, rate int, retries int) {
@@ -25,6 +26,16 @@ func Run(loglevel string, logformat string, iface string, input string, ports []
 	logger, err := log.SetupLogger(loglevel, logformat)
 	if err != nil {
 		logger.Fatal().Err(err).Msg("failed to setup logger")
+	}
+
+	if true {
+		f, err := os.Create("/tmp/cpu.profiler2")
+		if err != nil {
+			logger.Fatal().Err(err).Msg("failed to create profiler")
+		}
+		logger.Info().Msg("starting cpu profiling")
+		pprof.StartCPUProfile(f)
+		defer pprof.StopCPUProfile()
 	}
 
 	resultLogger, err := log.ResultWriter(logformat)

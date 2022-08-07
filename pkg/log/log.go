@@ -31,7 +31,7 @@ func SetupLogger(level string, format string) (zerolog.Logger, error) {
 	}
 	log = log.Level(lvl)
 
-	log = log.With().Timestamp().Logger()
+	// log = log.With().Timestamp().Logger()
 
 	switch format {
 	case "pretty":
@@ -41,8 +41,9 @@ func SetupLogger(level string, format string) (zerolog.Logger, error) {
 	case "json":
 	case "text":
 		log = log.Output(zerolog.ConsoleWriter{
-			Out:     os.Stderr,
-			NoColor: true,
+			Out:             os.Stderr,
+			FormatTimestamp: nil,
+			NoColor:         true,
 		})
 	default:
 		return log, ErrInvalidFormat

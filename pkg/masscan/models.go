@@ -2,8 +2,9 @@ package masscan
 
 import (
 	"fmt"
-	"inet.af/netaddr"
 	"math/rand"
+
+	"github.com/minight/netaddr"
 )
 
 type Port = uint16

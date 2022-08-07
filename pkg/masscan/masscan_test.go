@@ -1,11 +1,12 @@
 package masscan
 
 import (
+	"testing"
+
 	"github.com/minight/masscan-go/pkg/log"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/assert"
 	"inet.af/netaddr"
-	"testing"
 )
 
 func Test_buildcookie(t *testing.T) {
@@ -41,7 +42,7 @@ func BenchmarkBuildCookie2(b *testing.B) {
 }
 
 func Test_newClient(t *testing.T) {
-	_, err := New("en0", log.TestLogger(t, zerolog.InfoLevel))
+	_, err := New("en0", log.TestLogger(t, zerolog.InfoLevel), 10000, 0)
 	assert.Nil(t, err)
 }
 

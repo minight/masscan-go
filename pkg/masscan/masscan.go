@@ -9,14 +9,16 @@ import (
 	"time"
 
 	"github.com/dchest/siphash"
-	"github.com/google/gopacket"
-	"github.com/google/gopacket/layers"
-	"github.com/google/gopacket/pcap"
 	"github.com/jackpal/gateway"
+	"github.com/jellydator/ttlcache/v3"
+	"github.com/minight/gopacket"
+	"github.com/minight/gopacket/layers"
+	"github.com/minight/gopacket/pcap"
+	fakelimit "github.com/minight/masscan-go/pkg/ratelimit"
+	"github.com/minight/netaddr"
 	"github.com/pkg/errors"
 	"github.com/rs/zerolog"
 	"go.uber.org/ratelimit"
-	"inet.af/netaddr"
 )
 
 const (
@@ -53,12 +55,10 @@ func buildcookie2(src src, dst Dst, buf []byte) {
 	if len(buf) < 36 {
 		return
 	}
-	srcip := src.ip.As16()
-	copy(buf[0:16], srcip[:])
+	src.ip.As16At(buf[0:16])
 	binary.LittleEndian.PutUint16(buf[16:18], src.port)
 
-	dstip := dst.IP.As16()
-	copy(buf[18:34], dstip[:])
+	dst.IP.As16At(buf[18:34])
 	binary.LittleEndian.PutUint16(buf[34:36], dst.Port)
 }
 
@@ -71,41 +71,24 @@ func SynCookieV4(src src, dst Dst, seed uint64) SynCookie {
 	return SynCookie(sum64)
 }
 
-func (c *Client) AppendPacket(src src, dst Dst, cookie SynCookie) {
-	ip4 := &layers.IPv4{
-		TTL:      64,
-		Protocol: layers.IPProtocolTCP,
-		SrcIP:    src.ip.IPAddr().IP,
-		DstIP:    dst.IP.IPAddr().IP,
-		Version:  4,
-	}
+func (c *Client) AppendPacket(src src, dst Dst, cookie SynCookie, ip4 *layers.IPv4, tcp *layers.TCP, eth *layers.Ethernet) {
+	ip4.SrcIP = src.ip.IP4AddrAt(ip4.SrcIP)
+	ip4.DstIP = dst.IP.IP4AddrAt(ip4.DstIP)
+	tcp.Seq = uint32(cookie)
+	tcp.SrcPort = layers.TCPPort(src.port)
+	tcp.DstPort = layers.TCPPort(dst.Port)
+	// c.Log.Trace().
+	//	Str("srcMAC", c.srcMAC.String()).
+	//	Str("dstMAC", c.dstMAC.String()).
+	//	Uint16("srcPort", src.port).
+	//	Uint16("dstPort", dst.Port).
+	//	Str("srcIP", src.ip.String()).
+	//	Str("dstIP", dst.IP.String()).
+	//	Msg("sending packet")
+	tcp.SetNetworkLayerForChecksumV4(ip4)
+	gopacket.SerializeLayers(c.buf, c.opts, eth, ip4, tcp)
+}
 
-	tcp := &layers.TCP{
-		SrcPort: layers.TCPPort(src.port),
-		DstPort: layers.TCPPort(dst.Port),
-		SYN:     true,
-		Seq:     uint32(cookie),
-	}
-
-	c.Log.Trace().
-		Str("srcMAC", c.srcMAC.String()).
-		Str("dstMAC", c.dstMAC.String()).
-		Uint16("srcPort", src.port).
-		Uint16("dstPort", dst.Port).
-		Str("srcIP", src.ip.String()).
-		Str("dstIP", dst.IP.String()).
-		Msg("sending packet")
-
-	tcp.SetNetworkLayerForChecksum(ip4)
-	gopacket.SerializeLayers(c.buf, c.opts,
-		&layers.Ethernet{
-			SrcMAC:       c.srcMAC,
-			DstMAC:       c.dstMAC,
-			EthernetType: layers.EthernetTypeIPv4,
-		},
-		ip4,
-		tcp,
-	)
 }
 
 type Client struct {
@@ -368,6 +351,22 @@ func (c *Client) sender(ctx context.Context, in <-chan Targets) (sent int64, dur
 		Str("handle", c.handleName).
 		Msg("sending on")
 
+	var (
+		ip4 = layers.IPv4{
+			TTL:      64,
+			Protocol: layers.IPProtocolTCP,
+			Version:  4,
+		}
+		tcp = layers.TCP{
+			SYN: true,
+		}
+		eth = layers.Ethernet{
+			SrcMAC:       c.srcMAC,
+			DstMAC:       c.dstMAC,
+			EthernetType: layers.EthernetTypeIPv4,
+		}
+	)
+
 loop:
 	for {
 		select {
@@ -382,12 +381,12 @@ loop:
 			var i uint64
 			for i = 0; i < tg.MaxIdx()*uint64(1+c.retries); i++ {
 				t := tg.Get(i)
-				c.Log.Debug().
-					Str("host", t.IP.String()).
-					Uint16("Port", t.Port).
-					Msg("sending")
+				// c.Log.Debug().
+				//		Str("host", t.IP.String()).
+				//		Uint16("Port", t.Port).
+				//		Msg("sending")
 				cookie := SynCookieV4(c.src, t, entropySeed)
-				c.AppendPacket(c.src, t, cookie)
+				c.AppendPacket(c.src, t, cookie, &ip4, &tcp, &eth)
 
 				wait := c.ratelimit.Take()
 				sent++
@@ -403,13 +402,7 @@ loop:
 						Err(err).
 						Msg("failed to write packet data")
 				}
-				if err := c.buf.Clear(); err != nil {
-					c.Log.Error().
-						Str("host", t.IP.String()).
-						Uint16("Port", t.Port).
-						Err(err).
-						Msg("failed to clear the buffer")
-				}
+				// don't need to clear beacuse append packet does it for us
 			}
 		}
 	}
@@ -471,20 +464,20 @@ func (c *Client) recver(ctx context.Context, out chan Res) (seen int64, age time
 				cookie  = SynCookieV4(me, them, entropySeed)
 			)
 			if me != c.src {
-				c.Log.Trace().
-					Str("me", me.String()).
-					Str("them", them.String()).
-					Msg("not our packet. non-matching src")
+				// c.Log.Trace().
+				// 		Str("me", me.String()).
+				// 		Str("them", them.String()).
+				// 		Msg("not our packet. non-matching src")
 				continue
 			}
 
 			if uint32(cookie) != seqnoMe-1 {
-				c.Log.Trace().
-					Str("me", me.String()).
-					Str("them", them.String()).
-					Uint32("cookie", uint32(cookie)).
-					Uint32("gotcookie", seqnoMe-1).
-					Msg("failed to decode packet")
+				// 		c.Log.Trace().
+				// 			Str("me", me.String()).
+				// 			Str("them", them.String()).
+				// 			Uint32("cookie", uint32(cookie)).
+				// 			Uint32("gotcookie", seqnoMe-1).
+				// 			Msg("failed to decode packet")
 				continue
 			}
 			if c.cache.Get(them) != nil {
@@ -497,7 +490,7 @@ func (c *Client) recver(ctx context.Context, out chan Res) (seen int64, age time
 					Dst:   them,
 					State: ResultState_OPEN,
 				}
-				c.Log.Debug().Str("them", them.String()).Msg("Port open")
+				// c.Log.Debug().Str("them", them.String()).Msg("Port open")
 				// In theory, we should send a RST packet here, but we actually just rely on the kernel to do
 				// that for us. :p
 				// yes in theory, it may be possible for us to have a whole lot of dangling connections if the kernel
@@ -505,7 +498,7 @@ func (c *Client) recver(ctx context.Context, out chan Res) (seen int64, age time
 				// RST packets that it doesnt expect, so we can rely on that behaviour on *nix systems.
 				// Lol... shitty hacks
 			} else if tcp.RST {
-				c.Log.Debug().Str("them", them.String()).Msg("Port closed")
+				// c.Log.Debug().Str("them", them.String()).Msg("Port closed")
 				out <- Res{
 					Dst:   them,
 					State: ResultState_CLOSE,
