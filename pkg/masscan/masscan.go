@@ -343,7 +343,7 @@ func New(iface string, log zerolog.Logger, rate int, retries int) (*Client, erro
 	c.src.ip, _ = netaddr.FromStdIP(tmpip)
 
 	if rate == 0 {
-		c.ratelimit = ratelimit.NewUnlimited()
+		c.ratelimit = fakelimit.NewUnlimited()
 	} else {
 		c.ratelimit = ratelimit.New(rate, ratelimit.WithoutSlack)
 	}
