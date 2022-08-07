@@ -3,6 +3,7 @@ package log
 import (
 	"os"
 	"testing"
+	"time"
 
 	"github.com/pkg/errors"
 	"github.com/rs/zerolog"
@@ -20,6 +21,9 @@ func TestLogger(t *testing.T, level zerolog.Level) zerolog.Logger {
 }
 
 func SetupLogger(level string, format string) (zerolog.Logger, error) {
+	// set some global defaults for us
+	zerolog.DurationFieldUnit = time.Second
+
 	log := zerolog.New(os.Stderr)
 	lvl, err := zerolog.ParseLevel(level)
 	if err != nil {
