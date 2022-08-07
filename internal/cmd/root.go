@@ -21,27 +21,32 @@ const (
 func Run(loglevel string, logformat string, input string, ports []uint, rate int) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	log, err := log.SetupLogger(loglevel, logformat)
+	logger, err := log.SetupLogger(loglevel, logformat)
 	if err != nil {
-		log.Fatal().Err(err).Msg("failed to setup logger")
+		logger.Fatal().Err(err).Msg("failed to setup logger")
 	}
 
-	in, out, err := masscan.Run(ctx, "en0", log, rate)
+	resultLogger, err := log.ResultWriter(logformat)
 	if err != nil {
-		log.Fatal().Err(err).Msg("failed to run")
+		logger.Fatal().Err(err).Msg("failed to setup resultwriter")
+	}
+
+	in, out, err := masscan.Run(ctx, "en0", logger, rate)
+	if err != nil {
+		logger.Fatal().Err(err).Msg("failed to run")
 	}
 
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		if err := WriteResultsFrom(ctx, log, out); err != nil {
-			log.Error().Err(err).Msg("failed to write results")
+		if err := WriteResultsFrom(ctx, logger, resultLogger, out); err != nil {
+			logger.Error().Err(err).Msg("failed to write results")
 		}
 	}()
 
-	if err := ReadInputTo(ctx, log, input, convert.ConvertSlice[uint, uint16](ports), in); err != nil {
-		log.Error().Err(err).Msg("failed to read inputs")
+	if err := ReadInputTo(ctx, logger, input, convert.ConvertSlice[uint, uint16](ports), in); err != nil {
+		logger.Error().Err(err).Msg("failed to read inputs")
 	}
 
 	wg.Wait()
@@ -116,7 +121,7 @@ func ReadScannerTo(ctx context.Context, log zerolog.Logger, r *bufio.Scanner, po
 	return nil
 }
 
-func WriteResultsFrom(ctx context.Context, log zerolog.Logger, in <-chan masscan.Res) error {
+func WriteResultsFrom(ctx context.Context, log zerolog.Logger, resultLogger zerolog.Logger, in <-chan masscan.Res) error {
 	log.Trace().Msg("starting results writer")
 
 	for {
@@ -127,7 +132,7 @@ func WriteResultsFrom(ctx context.Context, log zerolog.Logger, in <-chan masscan
 			if v.Dst.Nil() && !ok {
 				return nil
 			}
-			log.Info().Str("ip", v.Dst.IP.String()).
+			resultLogger.Log().Str("ip", v.Dst.IP.String()).
 				Uint16("port", v.Dst.Port).
 				Str("state", v.State.String()).Send()
 		}

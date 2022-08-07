@@ -1,10 +1,11 @@
 package log
 
 import (
-	"github.com/pkg/errors"
-	"github.com/rs/zerolog"
 	"os"
 	"testing"
+
+	"github.com/pkg/errors"
+	"github.com/rs/zerolog"
 )
 
 var (
@@ -38,6 +39,30 @@ func SetupLogger(level string, format string) (zerolog.Logger, error) {
 		log = log.Output(zerolog.ConsoleWriter{
 			Out:     os.Stderr,
 			NoColor: true,
+		})
+	default:
+		return log, ErrInvalidFormat
+	}
+
+	return log, nil
+}
+
+// ResultWriter creates a logger outputting to stdout
+func ResultWriter(format string) (zerolog.Logger, error) {
+	log := zerolog.New(os.Stdout)
+	log = log.Level(zerolog.InfoLevel).With().Timestamp().Logger()
+
+	switch format {
+	case "pretty":
+		log = log.Output(zerolog.ConsoleWriter{
+			Out: os.Stdout,
+		})
+	case "json":
+	case "text":
+		log = log.Output(zerolog.ConsoleWriter{
+			Out:         os.Stdout,
+			NoColor:     true,
+			FormatLevel: nil,
 		})
 	default:
 		return log, ErrInvalidFormat
