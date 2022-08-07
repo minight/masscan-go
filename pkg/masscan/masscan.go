@@ -27,6 +27,11 @@ const (
 	entropySeed = 1
 )
 
+var (
+	ErrNoDevice  = errors.New("no device found")
+	ErrNoAddress = errors.New("device with no addresses selected")
+)
+
 func buildcookie(src src, dst Dst, buf []byte) []byte {
 	srcip := src.ip.As16()
 	buf = append(buf, srcip[:]...)
@@ -291,11 +296,11 @@ func New(iface string, log zerolog.Logger, rate int, retries int) (*Client, erro
 		}
 	}
 	if !found {
-		return nil, errors.Wrap(err, "unable to find device")
+		return nil, ErrNoDevice
 	}
 
 	if len(pcapiface.Addresses) == 0 {
-		return nil, errors.Wrap(err, "iface selected has no addresses")
+		return nil, ErrNoAddress
 	}
 
 	var (
