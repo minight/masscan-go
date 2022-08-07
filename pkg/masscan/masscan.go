@@ -343,7 +343,9 @@ func (c *Client) Close() error {
 	return nil
 }
 
-func (c *Client) sender(ctx context.Context, in <-chan Targets) {
+// sender returns the packets sent and the age of the sender
+func (c *Client) sender(ctx context.Context, in <-chan Targets) (sent int64, duration time.Duration) {
+	start := time.Now()
 	c.Log.Debug().
 		Str("handle", c.handleName).
 		Msg("sending on")
@@ -352,7 +354,7 @@ loop:
 	for {
 		select {
 		case <-ctx.Done():
-			return
+			return sent, time.Since(start)
 		case tg, ok := <-in:
 			if tg.IsEmpty() && !ok {
 				break loop
@@ -368,6 +370,7 @@ loop:
 				c.AppendPacket(c.src, t, cookie)
 
 				wait := c.ratelimit.Take()
+				sent++
 				tmp := c.buf.Bytes()
 				c.Log.Trace().
 					Bytes("packet", tmp).
@@ -386,16 +389,17 @@ loop:
 						Uint16("Port", t.Port).
 						Err(err).
 						Msg("failed to clear the buffer")
-
 				}
 			}
-
 		}
 	}
 	c.Log.Debug().Msg("exiting sender")
+
+	return sent, time.Since(start)
 }
 
-func (c *Client) recver(ctx context.Context, out chan Res) {
+func (c *Client) recver(ctx context.Context, out chan Res) (seen int64, age time.Duration) {
+	start := time.Now()
 	c.Log.Debug().
 		Str("handle", c.handleName).
 		Msg("recving on")
@@ -414,8 +418,9 @@ func (c *Client) recver(ctx context.Context, out chan Res) {
 	for {
 		select {
 		case <-ctx.Done():
-			return
+			return seen, time.Since(start)
 		default:
+			seen++
 			data, _, err := c.handle.ReadPacketData()
 			if err != nil {
 				c.Log.Debug().Err(err).Msg("failed to get packet")
@@ -469,6 +474,12 @@ func (c *Client) recver(ctx context.Context, out chan Res) {
 					State: ResultState_OPEN,
 				}
 				c.Log.Debug().Str("them", them.String()).Msg("Port open")
+				// In theory, we should send a RST packet here, but we actually just rely on the kernel to do
+				// that for us. :p
+				// yes in theory, it may be possible for us to have a whole lot of dangling connections if the kernel
+				// doesn't do that, but in current observations, it seems like the kernel will automatically
+				// RST packets that it doesnt expect, so we can rely on that behaviour on *nix systems.
+				// Lol... shitty hacks
 			} else if tcp.RST {
 				c.Log.Debug().Str("them", them.String()).Msg("Port closed")
 				out <- Res{
@@ -478,6 +489,7 @@ func (c *Client) recver(ctx context.Context, out chan Res) {
 			}
 		}
 	}
+	return seen, time.Since(start)
 }
 
 // Run will initialize the threads needed for performing Port scanning. Inputs are expected to be provided
@@ -506,7 +518,14 @@ func Run(ctx context.Context, iface string, log zerolog.Logger, rate int) (chan<
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		c.sender(ctx, in)
+		sent, age := c.sender(ctx, in)
+
+		pps := int64(float64(sent) / age.Seconds())
+		log.Info().
+			Int64("packets_sent", sent).
+			Dur("duration_seconds", age).
+			Int64("pps", pps).
+			Msg("packets send stats")
 
 		log.Info().Msg("waiting 5s for timeouts")
 		time.Sleep(5 * time.Second)
@@ -516,7 +535,14 @@ func Run(ctx context.Context, iface string, log zerolog.Logger, rate int) (chan<
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		c.recver(ctx, results)
+		recv, age := c.recver(ctx, results)
+
+		pps := int64(float64(recv) / age.Seconds())
+		log.Info().
+			Int64("packets_recv", recv).
+			Dur("duration_seconds", age).
+			Int64("pps", pps).
+			Msg("packet read stats")
 		log.Debug().Msg("exiting recver")
 
 		close(results)
